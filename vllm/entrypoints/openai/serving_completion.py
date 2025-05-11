@@ -338,30 +338,40 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
-                    chunk = CompletionStreamResponse(
-                        id=request_id,
-                        created=created_time,
-                        model=model_name,
-                        choices=[
-                            CompletionResponseStreamChoice(
-                                index=i,
-                                text=delta_text,
-                                logprobs=logprobs,
-                                finish_reason=finish_reason,
-                                stop_reason=stop_reason,
-                            )
-                        ])
-                    if include_continuous_usage:
-                        prompt_tokens = num_prompt_tokens[prompt_idx]
-                        completion_tokens = previous_num_tokens[i]
-                        chunk.usage = UsageInfo(
-                            prompt_tokens=prompt_tokens,
-                            completion_tokens=completion_tokens,
-                            total_tokens=prompt_tokens + completion_tokens,
+                    for tok_id in delta_token_ids:
+                        # turn [tok_id] into e.g. "hello"
+                        tok_text = tokenizer.decode([tok_id])
+                        
+                        # Build a choice that contains _only_ this one token
+                        single_choice = CompletionResponseStreamChoice(
+                            index=i,
+                            text=tok_text,
+                            logprobs=None,              # or compute per-token logprobs if you want
+                            # only the _last_ token in the batch should carry finish_reason/stop_reason
+                            finish_reason=(finish_reason if tok_id == delta_token_ids[-1] else None),
+                            stop_reason=(stop_reason     if tok_id == delta_token_ids[-1] else None),
                         )
+                        
+                        # Wrap it in the SSE response object
+                        single_chunk = CompletionStreamResponse(
+                            id=request_id,
+                            created=created_time,
+                            model=model_name,
+                            choices=[single_choice],
+                        )
+                        if include_continuous_usage:
+                            prompt_tokens = num_prompt_tokens[prompt_idx]
+                            completion_tokens = previous_num_tokens[i]  # or increment per-token if preferred
+                            single_chunk.usage = UsageInfo(
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                total_tokens=prompt_tokens + completion_tokens,
+                            )
+                        
+                        # Serialize and yield one SSE event per token
+                        response_json = single_chunk.model_dump_json(exclude_unset=False)
+                        yield f"data: {response_json}\n\n"
 
-                    response_json = chunk.model_dump_json(exclude_unset=False)
-                    yield f"data: {response_json}\n\n"
 
             total_prompt_tokens = sum(num_prompt_tokens)
             total_completion_tokens = sum(previous_num_tokens)
